@@ -1,0 +1,11 @@
+[server]
+# Streamlit's default per-file limit is 200 MB. Mission imagery can be much larger.
+maxUploadSize = 1500
+
+[theme]
+base = "light"
+primaryColor = "#1769aa"
+backgroundColor = "#f5f7fb"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#172b4d"
+font = "sans serif"

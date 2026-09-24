@@ -17,6 +17,10 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+ui = [
+    "streamlit>=1.39",
+    "tifffile>=2023.7",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
