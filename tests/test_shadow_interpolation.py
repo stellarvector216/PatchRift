@@ -346,3 +346,19 @@ def test_populate_threshold_field_empty_cells_leaves_field_undefined():
 
     assert np.all(np.isnan(field))
     assert not np.any(defined_mask)
+
+
+def test_edge_subtile_anchor_uses_its_true_size_and_leaves_trailing_band_undefined():
+    thresholds = [
+        SubtileThreshold(0, 1024, 0, 1024, 0.0),
+        SubtileThreshold(0, 1024, 1024, 2600, 10.0),
+        SubtileThreshold(1024, 1800, 0, 1024, 20.0),
+        SubtileThreshold(1024, 1800, 1024, 2600, 30.0),
+    ]
+
+    cells = build_complete_interpolation_cells(thresholds)
+    field, defined_mask = populate_threshold_field((1800, 2600), cells)
+
+    assert defined_mask[899, 1299]
+    assert not defined_mask[1799, 2599]
+    assert np.isnan(field[1799, 2599])

@@ -80,6 +80,37 @@ def test_ingest_preserves_image_values():
     )
 
 
+def test_ingest_excludes_nan_and_multiple_fill_values():
+    raw = np.array(
+        [[1.0, np.nan, -999.0, -888.0]],
+        dtype=np.float32,
+    )
+
+    product = ingest_array(
+        raw,
+        fill_value=(-999.0, -888.0),
+        metadata=make_metadata(),
+    )
+
+    np.testing.assert_array_equal(
+        product.valid_mask,
+        np.array([[True, False, False, False]]),
+    )
+
+
+def test_ingest_accepts_a_nan_fill_declaration():
+    product = ingest_array(
+        np.array([[1.0, np.nan]], dtype=np.float32),
+        fill_value=np.nan,
+        metadata=make_metadata(),
+    )
+
+    np.testing.assert_array_equal(
+        product.valid_mask,
+        np.array([[True, False]]),
+    )
+
+
 def test_metadata_is_stored():
     metadata = make_metadata()
 

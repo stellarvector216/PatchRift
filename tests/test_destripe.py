@@ -60,6 +60,23 @@ def test_destripe_uses_valid_pixels_only():
     )
 
 
+def test_destripe_does_not_filter_invalid_fill_values_into_neighbors():
+    image = np.array(
+        [
+            [10.0, 10.0, 10.0],
+            [10.0, -999.0, 10.0],
+            [10.0, 10.0, 10.0],
+        ],
+        dtype=np.float32,
+    )
+    valid_mask = image != -999.0
+
+    result = destripe(image, valid_mask)
+
+    np.testing.assert_allclose(result[valid_mask], 10.0)
+    assert result[1, 1] == -999.0
+
+
 def test_destripe_preserves_float32_output():
     image = np.arange(25, dtype=np.float32).reshape(5, 5)
     valid_mask = np.ones_like(image, dtype=bool)

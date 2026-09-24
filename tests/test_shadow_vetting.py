@@ -1445,6 +1445,7 @@ def test_is_sector_half_angle_usable_rejects_nonfinite():
 
 def test_precision_weight_zero_uncertainty_is_one():
     assert np.isclose(precision_weight(0.0), 1.0)
+    assert np.isclose(precision_weight(angular_uncertainty=0.0), 1.0)
 
 
 def test_precision_weight_decreases_with_uncertainty():
@@ -2728,3 +2729,20 @@ def test_infer_sector_half_angles_rejects_empty_input():
             np.array([]),
             np.array([]),
         )
+
+
+@pytest.mark.parametrize("eccentricity", [0.0, 1.0, 1.1, np.nan, np.inf, -np.inf])
+def test_infer_sector_half_angles_marks_invalid_eccentricities_without_nan_leak(eccentricity):
+    values, valid = infer_sector_half_angles(
+        np.array([0.2, 0.5, eccentricity]),
+        np.array([0.0, 0.0, 0.0]),
+    )
+    assert valid[:2].all()
+    assert not valid[2]
+    assert np.isnan(values[2])
+    assert np.isfinite(values[valid]).all()
+
+
+def test_shape_ratio_rejects_eccentricity_one_boundary():
+    with pytest.raises(ValueError, match=r"\[0, 1\)"):
+        shape_ratio_from_eccentricity(1.0, np.pi / 2.0)

@@ -29,6 +29,12 @@ class SolarGeometry:
 
     azimuth: float
     elevation: float
+
+    def __post_init__(self) -> None:
+        if not np.isfinite(self.azimuth) or not np.isfinite(self.elevation):
+            raise ValueError("solar azimuth and elevation must be finite")
+        if not -np.pi / 2.0 <= self.elevation <= np.pi / 2.0:
+            raise ValueError("solar elevation must lie in [-pi/2, pi/2]")
 def elevation_is_usable(
     elevation: float,
     minimum_degrees: float = 2.0,

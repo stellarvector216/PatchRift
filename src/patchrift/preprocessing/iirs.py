@@ -1,6 +1,64 @@
+from collections.abc import Callable
+
 import numpy as np
+from scipy.integrate import quad
 
 from patchrift.io.iirs import IIRSProduct
+
+
+def tmc_spectral_overlap_weights(
+    product: IIRSProduct,
+    response: Callable[[float], float] | tuple[np.ndarray, np.ndarray],
+    response_domain: tuple[float, float] | None = None,
+) -> np.ndarray:
+    """Integrate the TMC spectral response over each IIRS band.
+
+    A callable response must be accompanied by its finite wavelength
+    domain. A lookup table is a pair of wavelength and response arrays;
+    linear interpolation is used only between its first and last sample.
+    Portions of IIRS bands outside that domain contribute exactly zero.
+    """
+    if product.band_bounds is None:
+        raise ValueError("IIRS band_bounds are required to integrate response overlap")
+
+    if callable(response):
+        if response_domain is None:
+            raise ValueError("response_domain is required for a callable response")
+        domain = np.asarray(response_domain, dtype=float)
+        if domain.shape != (2,) or not np.all(np.isfinite(domain)) or domain[0] >= domain[1]:
+            raise ValueError("response_domain must be finite increasing wavelength limits")
+
+        def response_at(wavelength: float) -> float:
+            value = float(response(wavelength))
+            if not np.isfinite(value) or value < 0.0:
+                raise ValueError("spectral response must be finite and non-negative")
+            return value
+
+        evaluate = response_at
+    else:
+        if response_domain is not None:
+            raise ValueError("response_domain is inferred from a lookup table")
+        if not isinstance(response, tuple) or len(response) != 2:
+            raise TypeError("response must be callable or a (wavelengths, values) tuple")
+        wavelengths = np.asarray(response[0], dtype=float)
+        values = np.asarray(response[1], dtype=float)
+        if (
+            wavelengths.ndim != 1 or values.shape != wavelengths.shape
+            or wavelengths.size < 2 or not np.all(np.isfinite(wavelengths))
+            or not np.all(np.isfinite(values)) or np.any(np.diff(wavelengths) <= 0.0)
+            or np.any(values < 0.0)
+        ):
+            raise ValueError("response lookup arrays must be finite, increasing, and non-negative")
+        domain = np.array([wavelengths[0], wavelengths[-1]])
+        evaluate = lambda wavelength: float(np.interp(wavelength, wavelengths, values))
+
+    weights = np.zeros(product.cube.shape[0], dtype=float)
+    for index, (band_low, band_high) in enumerate(product.band_bounds):
+        low = max(float(band_low), float(domain[0]))
+        high = min(float(band_high), float(domain[1]))
+        if high > low:
+            weights[index] = quad(evaluate, low, high, epsabs=1e-10, epsrel=1e-8)[0]
+    return weights
 
 
 def reduce_iirs_to_panchromatic(
@@ -62,12 +120,27 @@ def reduce_iirs_to_panchromatic(
 
     selected_cube = cube[eligible]
     selected_weights = weights[eligible]
+    selected_valid = product.valid_mask[eligible]
 
-    denominator = np.sum(selected_weights)
+    weighted_valid = selected_valid * selected_weights[:, None, None]
+    denominator = np.sum(weighted_valid, axis=0)
 
-    reduced = np.sum(
-        selected_cube * selected_weights[:, None, None],
+    numerator = np.sum(
+        np.where(selected_valid, selected_cube, 0.0)
+        * selected_weights[:, None, None],
         axis=0,
-    ) / denominator
+    )
+
+    reduced = np.full(
+        cube.shape[1:],
+        np.nan,
+        dtype=np.float32,
+    )
+    np.divide(
+        numerator,
+        denominator,
+        out=reduced,
+        where=denominator > 0.0,
+    )
 
     return reduced.astype(np.float32)

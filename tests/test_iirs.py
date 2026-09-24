@@ -123,3 +123,34 @@ def test_iirs_reduction_fails_when_no_valid_bands_remain():
 
     with pytest.raises(ValueError, match="no valid IIRS bands"):
         reduce_iirs_to_panchromatic(product)
+
+
+def test_iirs_reduction_ignores_invalid_band_samples_per_pixel():
+    product = IIRSProduct(
+        cube=np.array(
+            [
+                [[10.0, 10.0]],
+                [[30.0, np.nan]],
+            ],
+            dtype=np.float32,
+        ),
+        wavelengths=np.array([1.0, 2.0]),
+        bad_bands=np.array([False, False]),
+        snr=np.array([1.0, 1.0]),
+    )
+
+    result = reduce_iirs_to_panchromatic(product)
+
+    np.testing.assert_allclose(result[0, 0], 20.0)
+    np.testing.assert_allclose(result[0, 1], 10.0)
+
+
+@pytest.mark.parametrize("snr", [np.nan, np.inf, -np.inf])
+def test_iirs_product_rejects_nonfinite_snr(snr):
+    with pytest.raises(ValueError, match="snr must be finite"):
+        IIRSProduct(
+            cube=np.ones((1, 2, 2)),
+            wavelengths=np.array([1.0]),
+            bad_bands=np.array([False]),
+            snr=np.array([snr]),
+        )

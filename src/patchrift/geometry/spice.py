@@ -322,3 +322,34 @@ def solar_azimuth_derivatives(
         float(dA_dlatitude),
         float(dA_dlongitude),
     )
+
+
+def default_azimuth_derivative_steps(
+    latitude_half_extent: float,
+    longitude_half_extent: float,
+    latitude: float,
+    floor_degrees: float = 1e-4,
+) -> tuple[float, float]:
+    """Return Addendum A5's tile-scaled central-difference steps.
+
+    The latitude step is one tenth of the tile's angular half-extent,
+    floored at 10^-4 degrees.  Longitude is scaled by cos(latitude)
+    so both perturbations represent comparable local ground spans.
+    Callers may still supply different steps when their SPICE profile
+    requires it, as permitted by the addendum.
+    """
+    values = (latitude_half_extent, longitude_half_extent, latitude, floor_degrees)
+    if not all(np.isfinite(value) for value in values):
+        raise ValueError("step inputs must be finite")
+    if latitude_half_extent < 0.0 or longitude_half_extent < 0.0:
+        raise ValueError("tile half-extents must be non-negative")
+    if floor_degrees <= 0.0:
+        raise ValueError("floor_degrees must be positive")
+
+    floor = np.deg2rad(floor_degrees)
+    latitude_step = max(0.1 * latitude_half_extent, floor)
+    cos_latitude = abs(float(np.cos(latitude)))
+    if cos_latitude <= np.finfo(float).eps:
+        raise ValueError("longitude step is undefined at a lunar pole")
+    longitude_step = max(0.1 * longitude_half_extent / cos_latitude, floor / cos_latitude)
+    return float(latitude_step), float(longitude_step)

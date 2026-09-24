@@ -1,3 +1,5 @@
+from collections.abc import Collection
+
 import numpy as np
 
 from patchrift.geometry.handedness import (
@@ -9,7 +11,7 @@ from .product import ImageProduct, ProductMetadata
 
 def ingest_array(
     array: np.ndarray,
-    fill_value: float | int,
+    fill_value: float | int | Collection[float | int] | None,
     metadata: ProductMetadata,
 ) -> ImageProduct:
     """
@@ -20,7 +22,29 @@ def ingest_array(
     """
 
     image = np.asarray(array, dtype=np.float32)
-    valid_mask = image != fill_value
+
+    if image.ndim != 2:
+        raise ValueError("array must be a 2D scalar image")
+
+    # The specification requires every subsequent reduction to use
+    # valid pixels only.  Non-finite samples and every declared fill
+    # value are therefore excluded at ingest, including NaN fills.
+    valid_mask = np.isfinite(image)
+
+    if fill_value is not None:
+        if isinstance(fill_value, Collection) and not isinstance(
+            fill_value,
+            (str, bytes),
+        ):
+            fill_values = tuple(fill_value)
+        else:
+            fill_values = (fill_value,)
+
+        for value in fill_values:
+            if np.isnan(value):
+                valid_mask &= ~np.isnan(image)
+            else:
+                valid_mask &= image != value
 
     jacobian = fit_geolocation_jacobian(
         metadata.footprint_corners,
@@ -47,6 +71,8 @@ def ingest_array(
             gsd=metadata.gsd,
             emission_angle=metadata.emission_angle,
             hmax=metadata.hmax,
+            latitude_uncertainty=metadata.latitude_uncertainty,
+            longitude_uncertainty=metadata.longitude_uncertainty,
         )
 
     return ImageProduct(

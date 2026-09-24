@@ -445,6 +445,7 @@ def build_context_region(
     shadow_mask: np.ndarray,
     centroid: tuple[float, float],
     context_radius: float,
+    valid_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Build the photometric context region B_k around a shadow centroid."""
     if shadow_mask.ndim != 2:
@@ -469,7 +470,17 @@ def build_context_region(
         < context_radius ** 2
     )
 
-    return inside_radius & ~shadow_mask.astype(bool)
+    context = inside_radius & ~shadow_mask.astype(bool)
+
+    if valid_mask is not None:
+        valid_mask = np.asarray(valid_mask, dtype=bool)
+        if valid_mask.shape != shadow_mask.shape:
+            raise ValueError(
+                "valid_mask must have the same shape as shadow_mask"
+            )
+        context &= valid_mask
+
+    return context
 
 def local_background_level(
     image: np.ndarray,
@@ -847,8 +858,8 @@ def shape_ratio_from_eccentricity(
     if not np.isfinite(eccentricity):
         raise ValueError("eccentricity must be finite")
 
-    if eccentricity < 0.0 or eccentricity > 1.0:
-        raise ValueError("eccentricity must be in [0, 1]")
+    if eccentricity < 0.0 or eccentricity >= 1.0:
+        raise ValueError("eccentricity must lie in [0, 1)")
 
     if not np.isfinite(omega):
         raise ValueError("omega must be finite")
@@ -944,6 +955,8 @@ def infer_sector_half_angle(eccentricity: float, omega: float) -> float:
 
     Returns delta_hat in radians.
     """
+    if not np.isfinite(eccentricity) or eccentricity <= 0.0:
+        raise ValueError("eccentricity must be positive for an identifiable component axis")
     rho = shape_ratio_from_eccentricity(eccentricity, omega)
     delta_hat = invert_sector_shape_ratio(rho)
 
@@ -1024,10 +1037,18 @@ def infer_sector_half_angles(
     return delta_hats, valid
 
 def precision_weight(
-    sigma_theta: float,
+    sigma_theta: float | None = None,
     sigma0: float = np.deg2rad(0.5),
+    *,
+    angular_uncertainty: float | None = None,
 ) -> float:
     """Compute the V3 precision weight from Eq. 29."""
+    if angular_uncertainty is not None:
+        if sigma_theta is not None:
+            raise TypeError("supply sigma_theta or angular_uncertainty, not both")
+        sigma_theta = angular_uncertainty
+    if sigma_theta is None:
+        raise TypeError("sigma_theta (angular_uncertainty) is required")
     if not np.isfinite(sigma_theta):
         raise ValueError("sigma_theta must be finite")
 
@@ -1400,6 +1421,7 @@ def compute_centroid_azimuth_measurement(
     labels: np.ndarray,
     component_id: int,
     shadow_mask: np.ndarray,
+    valid_mask: np.ndarray | None = None,
     fseg: float = 3.0,
 ) -> tuple[float, float, float, float, float, float, float, float]:
     """Compute the V3 centroid-based azimuth measurement for one component.
@@ -1433,6 +1455,7 @@ def compute_centroid_azimuth_measurement(
         shadow_mask,
         shadow_centroid_xy,
         rctx,
+        valid_mask=valid_mask,
     )
 
     background = local_background_level(
@@ -1499,4 +1522,3 @@ def compute_centroid_azimuth_measurement(
         float(sigma_pos),
         float(sigma_theta),
     )
-

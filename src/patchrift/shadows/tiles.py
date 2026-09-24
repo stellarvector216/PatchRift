@@ -35,9 +35,7 @@ class Subtile:
         The centre is used as the spatial sample location for the
         threshold associated with this subtile.
 
-        This is an implementation convention for §5.2 bilinear
-        interpolation; Version 3 does not explicitly specify the
-        threshold sample anchor.
+        Addendum 1 A1 mandates the subtile-centroid anchor.
         """
         return (
             (self.row_start + self.row_end - 1) / 2.0,
@@ -101,6 +99,4 @@ def generate_subtiles(
                     col_end=col_end,
                 )
             )
-
     return subtiles
-    

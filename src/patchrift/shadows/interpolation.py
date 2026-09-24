@@ -34,8 +34,8 @@ def build_complete_interpolation_cells(
     A cell is created only when all four neighbouring subtile
     threshold samples are available.
 
-    This is an implementation convention because Version 3 does
-    not specify a fallback for missing interpolation neighbours.
+    Addendum 1 A2 requires all four neighbouring threshold samples;
+    no fallback, clamping, or extrapolation is permitted.
     """
 
     threshold_map = {
@@ -104,10 +104,9 @@ def bilinear_threshold(
         u = horizontal/column interpolation coordinate
         v = vertical/row interpolation coordinate
 
-    Version 3 does not explicitly define the threshold-sample
-    anchor or boundary behaviour. This function follows the
-    implementation convention that each subtile threshold is
-    sampled at the subtile centre.
+    Addendum 1 A1 fixes the threshold-sample anchor at each
+    subtile centroid. Addendum 1 A2 excludes every location
+    outside a complete interpolation cell.
     """
 
     top_left_row, top_left_col = (
@@ -263,10 +262,9 @@ def initialize_threshold_field(
 
     Notes
     -----
-    Version 3 does not specify extrapolation or fallback behaviour
-    outside complete bilinear interpolation cells. Such pixels
-    therefore remain undefined rather than being assigned an
-    invented threshold.
+    Addendum 1 A2 requires locations outside complete bilinear
+    interpolation cells to remain undefined; no fallback,
+    clamping, or extrapolation is allowed.
     """
 
     if len(image_shape) != 2:
@@ -307,8 +305,8 @@ def populate_threshold_field(
     Pixels not covered by any complete interpolation cell remain
     undefined (NaN) and are marked False in defined_mask.
 
-    Version 3 does not specify extrapolation or fallback behaviour
-    for regions without four valid interpolation samples.
+    Addendum 1 A2 requires locations without four valid
+    interpolation samples to remain undefined.
     """
 
     threshold_field, defined_mask = initialize_threshold_field(

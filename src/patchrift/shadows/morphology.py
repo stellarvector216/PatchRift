@@ -34,11 +34,13 @@ def apply_opening_and_closing(
     opened = ndimage.binary_opening(
         shadow_mask,
         structure=structure,
+        border_value=0,
     )
 
     closed = ndimage.binary_closing(
         opened,
         structure=structure,
+        border_value=0,
     )
 
     return closed
@@ -185,11 +187,13 @@ def build_shadow_regions(
     eroded = ndimage.binary_erosion(
         shadow_mask,
         structure=structure,
+        border_value=0,
     )
 
     dilated = ndimage.binary_dilation(
         shadow_mask,
         structure=structure,
+        border_value=0,
     )
 
     shadow_region = shadow_mask.copy()
