@@ -20,6 +20,7 @@ dev = [
 ui = [
     "streamlit>=1.39",
     "tifffile>=2023.7",
+    "pillow>=10",
 ]
 
 [tool.setuptools.packages.find]

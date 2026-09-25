@@ -48,7 +48,7 @@ def process_stage_ii_image(
     pixel_to_location: Callable[[float, float], tuple[float, float]] | None = None,
     solar_geometry_at: Callable[[str, float, float], SolarGeometry] | None = None,
     solar_azimuth_at: Callable[[float, float], float] | None = None,
-    solar_derivatives_at: Callable[..., tuple[float, float]] | None = None,
+    solar_derivatives_at: Callable[..., tuple[float, float] | None] | None = None,
     derivative_steps: tuple[float, float] | None = None,
     rim_radius_provider: Callable | None = None,
 ) -> StageIIImageResult:
@@ -109,17 +109,27 @@ def process_stage_ii_image(
         )
         if len(steps) != 2 or not np.all(np.isfinite(steps)) or min(steps) <= 0.0:
             raise ValueError("derivative_steps must contain two finite positive angular steps")
-        d_a_d_lat, d_a_d_lon = solar_derivatives_at(
+        derivatives = solar_derivatives_at(
             timestamp,
             latitude,
             longitude,
             latitude_step=steps[0],
             longitude_step=steps[1],
         )
+        if derivatives is None:
+            # Metadata-only geometry intentionally has no spatial derivative.
+            # Keep the uncertainty unavailable instead of reporting a false zero.
+            d_a_d_lat = d_a_d_lon = None
+        else:
+            if len(derivatives) != 2 or not np.all(np.isfinite(derivatives)):
+                raise ValueError("solar derivatives must be two finite values or None")
+            d_a_d_lat, d_a_d_lon = map(float, derivatives)
         sigma_geo = None
         if (
             metadata.latitude_uncertainty is not None
             and metadata.longitude_uncertainty is not None
+            and d_a_d_lat is not None
+            and d_a_d_lon is not None
         ):
             sigma_geo = float(np.hypot(
                 d_a_d_lat * metadata.latitude_uncertainty,

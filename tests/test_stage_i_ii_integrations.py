@@ -105,6 +105,35 @@ def test_stage_ii_pipeline_plans_memory_bounded_tiles_and_propagates_geometry(mo
     assert all(tile.shadow_footprint_disagreement is not None for tile in result.tile_results)
 
 
+def test_stage_ii_metadata_geometry_can_bypass_spatial_derivatives(monkeypatch):
+    import patchrift.pipeline.workflow as workflow
+
+    product = ImageProduct(np.ones((4, 4)), np.ones((4, 4), bool), _metadata())
+    stage_i = prepare_image_product(product)
+    monkeypatch.setattr(
+        workflow, "process_solar_tile",
+        lambda image, valid, solar, config, **kwargs: SolarTileResult(
+            segmentation=None, solar_geometry=solar, pixel_azimuth=0.2,
+            sigma_phi=0.01, north_angle=0.3, measurements=(),
+            used_scharr_fallback=False, low_confidence=False, c4=False,
+            scharr_disagreement_flag=False, implied_slope_diagnostic=None,
+        ),
+    )
+    derivative_calls = []
+    result = process_stage_ii_image(
+        stage_i, StageIIConfig(q=0.05), max_pixels_per_tile=100,
+        solar_geometry_at=lambda timestamp, lat, lon: SolarGeometry(0.4, 0.3),
+        solar_azimuth_at=lambda lat, lon: 0.4,
+        solar_derivatives_at=lambda *args, **kwargs: derivative_calls.append(args) or None,
+    )
+
+    assert result.tiles
+    assert len(derivative_calls) == len(result.tiles)
+    assert all(tile.d_azimuth_d_latitude is None for tile in result.tile_results)
+    assert all(tile.d_azimuth_d_longitude is None for tile in result.tile_results)
+    assert all(tile.sigma_geo is None for tile in result.tile_results)
+
+
 def test_pair_solar_geometry_requires_angles_and_propagates_variance():
     from patchrift.pipeline.stage_ii import pair_solar_geometry
 

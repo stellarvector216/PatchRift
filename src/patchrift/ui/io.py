@@ -10,7 +10,7 @@ import numpy as np
 
 
 def read_scalar_image(filename: str, payload: bytes) -> np.ndarray:
-    """Read a 2D NumPy array or single-band TIFF from uploaded bytes."""
+    """Read a scalar NumPy array, grayscale PNG, or single-band TIFF."""
     suffix = Path(filename).suffix.lower()
     if suffix == ".npy":
         image = np.load(BytesIO(payload), allow_pickle=False)
@@ -20,8 +20,20 @@ def read_scalar_image(filename: str, payload: bytes) -> np.ndarray:
         except ImportError as exc:  # pragma: no cover - install extra for UI use
             raise RuntimeError("TIFF uploads require the 'tifffile' UI dependency") from exc
         image = tifffile.imread(BytesIO(payload))
+    elif suffix == ".png":
+        try:
+            from PIL import Image
+        except ImportError as exc:  # pragma: no cover - Streamlit UI extra includes Pillow
+            raise RuntimeError("PNG uploads require Pillow; install the 'ui' extra") from exc
+        with Image.open(BytesIO(payload)) as png:
+            if png.mode not in {"1", "L", "I", "I;16", "I;16B", "I;16L", "F"}:
+                raise ValueError(
+                    f"PNG mode {png.mode!r} is not a grayscale scalar image. "
+                    "Upload a grayscale PNG; RGB/RGBA images are not converted automatically."
+                )
+            image = np.asarray(png)
     else:
-        raise ValueError("Upload a .npy or single-band .tif/.tiff image")
+        raise ValueError("Upload a .npy, grayscale .png, or single-band .tif/.tiff image")
 
     image = np.asarray(image)
     if image.ndim != 2:

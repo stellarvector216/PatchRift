@@ -21,6 +21,16 @@ from patchrift.pipeline import (
     process_stage_ii_image,
 )
 from patchrift.ui.io import parse_footprint_corners, parse_utc_timestamp, read_scalar_image
+from patchrift.ui.tile_matching import match_tile_pairs_incrementally, plan_tile_pairs
+from patchrift.ui.tile_summary import tile_summary_rows
+from patchrift.ui.solar_mode import (
+    COMPARE_MODE,
+    METADATA_MODE,
+    SPICE_MODE,
+    degrees_to_geometry,
+    metadata_geometry_kwargs,
+    uses_spice,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
@@ -69,21 +79,22 @@ st.markdown(
 )
 
 
-def _product_form(label: str, key: str) -> dict:
+def _product_form(label: str, key: str, geometry_mode: str) -> dict:
     st.subheader(label)
     st.caption(
         "Enter values from this image product's label, metadata file, or geolocation sidecar. "
         "Do not use approximate map coordinates for the footprint."
     )
     upload = st.file_uploader(
-        "Image data · single band (.npy or .tif/.tiff)",
-        type=["npy", "tif", "tiff"],
+        "Image data · single band (.png, .npy, .tif/.tiff)",
+        type=["png", "npy", "tif", "tiff"],
         key=f"upload_{key}",
-        help="Upload a two-dimensional rows × columns numeric array. Use the calibrated scalar OHRC/TMC image, or an IIRS image after the specified spectral reduction. Do not upload a colour screenshot or a raw multi-band IIRS cube.",
+        help="Upload a two-dimensional rows × columns numeric array or grayscale PNG. Use the calibrated scalar OHRC/TMC image, or an IIRS image after the specified spectral reduction. Do not upload a colour screenshot or a raw multi-band IIRS cube.",
     )
     st.caption(
-        "Accepted: 2D NumPy array or single-band TIFF. For raw IIRS cubes, first run the "
-        "Stage-I band reduction to produce one scalar image."
+        "Accepted: grayscale PNG (8/16-bit), 2D NumPy array, or single-band TIFF. "
+        "RGB/RGBA PNGs are rejected rather than converted. For raw IIRS cubes, first run "
+        "the Stage-I band reduction to produce one scalar image."
     )
     sensor = st.selectbox(
         "Sensor label (shown in results)",
@@ -98,6 +109,25 @@ def _product_form(label: str, key: str) -> dict:
         help="The UTC capture time from the image product metadata. SPICE uses it to calculate where the Sun was during acquisition.",
     )
     st.caption("Format: `YYYY-MM-DDTHH:MM:SSZ`, for example `2025-01-15T12:30:00Z`.")
+    solar_azimuth_deg = solar_elevation_deg = None
+    if geometry_mode != SPICE_MODE:
+        st.markdown("**Scene-wide solar angles from metadata**")
+        st.caption(
+            "Enter the product's scene-wide solar azimuth and elevation in degrees. "
+            "This mode treats both values as constant across all tiles. Confirm the "
+            "metadata's azimuth convention matches the V3 solar-azimuth convention."
+        )
+        angle_col_az, angle_col_el = st.columns(2)
+        solar_azimuth_deg = angle_col_az.number_input(
+            "Solar azimuth · degrees", min_value=0.0, max_value=360.0,
+            value=None, format="%.4f", key=f"solar_azimuth_{key}",
+            help="Scene-wide solar azimuth from product metadata, clockwise from the product's documented reference direction.",
+        )
+        solar_elevation_deg = angle_col_el.number_input(
+            "Solar elevation · degrees", min_value=-90.0, max_value=90.0,
+            value=None, format="%.4f", key=f"solar_elevation_{key}",
+            help="Scene-wide elevation of the Sun above the local horizon, from product metadata.",
+        )
     gsd = st.number_input(
         "Ground sample distance · GSD (metres per pixel)", min_value=0.000001,
         value=None, format="%.6f", key=f"gsd_{key}",
@@ -153,6 +183,8 @@ def _product_form(label: str, key: str) -> dict:
         "upload": upload,
         "sensor": sensor,
         "timestamp": timestamp,
+        "solar_azimuth_rad": None if solar_azimuth_deg is None else float(np.deg2rad(solar_azimuth_deg)),
+        "solar_elevation_rad": None if solar_elevation_deg is None else float(np.deg2rad(solar_elevation_deg)),
         "gsd": None if gsd is None else float(gsd),
         "emission_rad": None if emission_deg is None else float(np.deg2rad(emission_deg)),
         "corners_text": corners,
@@ -213,58 +245,41 @@ def _preview(image: np.ndarray) -> np.ndarray:
     return (scaled[::stride, ::stride] * 255).astype(np.uint8)
 
 
-def _tile_summary(result) -> list[dict]:
-    rows = []
-    for index, (tile, solar) in enumerate(zip(result.tiles, result.tile_results), start=1):
-        rows.append({
-            "Tile": index,
-            "Rows": f"{tile.row_start}:{tile.row_end}",
-            "Columns": f"{tile.col_start}:{tile.col_end}",
-            "Solar elevation (°)": round(float(np.rad2deg(solar.solar_geometry.elevation)), 3),
-            "Shadow azimuth (°)": (None if solar.pixel_azimuth is None else round(float(np.rad2deg(solar.pixel_azimuth)), 3)),
-            "North angle (°)": (None if solar.north_angle is None else round(float(np.rad2deg(solar.north_angle)), 3)),
-            "Planarity warning": result.planarity_flag,
-            "Low confidence": solar.low_confidence,
-            "C4 fallback": solar.c4,
-        })
-    return rows
-
-
-def _correspondence_csv(pair_result) -> str:
+def _pair_results_csv(records: list[dict]) -> str:
     out = StringIO()
     writer = csv.writer(out)
-    writer.writerow(["index_a", "index_b", "x_a", "y_a", "x_b", "y_b", "descriptor_distance", "inlier"])
-    a = pair_result.features_a.features.canonical_positions
-    b = pair_result.features_b.features.canonical_positions
-    matching = pair_result.matching
-    for position, (idx_a, idx_b) in enumerate(matching.pairs):
-        writer.writerow([
-            int(idx_a), int(idx_b), *a[idx_a].tolist(), *b[idx_b].tolist(),
-            float(matching.distances[position]), bool(matching.inlier_mask[position]),
-        ])
+    writer.writerow([
+        "tile_a", "tile_b", "index_a", "index_b", "x_a", "y_a", "x_b", "y_b",
+        "descriptor_distance", "inlier",
+    ])
+    for record in records:
+        for row in record.get("correspondence_rows", ()):
+            writer.writerow([
+                record["tile_a"] + 1, record["tile_b"] + 1, *row,
+            ])
     return out.getvalue()
 
 
-def _matching_json(pair_result) -> str:
-    result = pair_result.matching
-    def optional_number(value):
-        return None if value is None or not np.isfinite(value) else float(value)
+def _pair_results_json(records: list[dict], mode: str) -> str:
+    pairs = []
+    for record in records:
+        matching = record.get("matching")
+        pairs.append({
+            "tile_a": record["tile_a"] + 1,
+            "tile_b": record["tile_b"] + 1,
+            "error": record.get("error"),
+            "aligned": None if matching is None else bool(matching.aligned),
+            "inlier_count": None if matching is None else int(matching.inlier_count),
+            "rms_residual_meters": None if matching is None or matching.rms_residual_meters is None or not np.isfinite(matching.rms_residual_meters) else float(matching.rms_residual_meters),
+            "delta_alpha_radians": None if matching is None or matching.delta_alpha is None or not np.isfinite(matching.delta_alpha) else float(matching.delta_alpha),
+            "sigma_delta_alpha_radians": None if matching is None or matching.sigma_delta_alpha is None or not np.isfinite(matching.sigma_delta_alpha) else float(matching.sigma_delta_alpha),
+            "translation": None if matching is None or matching.translation is None else matching.translation.tolist(),
+            "homography": None if matching is None or matching.homography is None else matching.homography.tolist(),
+        })
+    return json.dumps({"tile_pairing_mode": mode, "pairs": pairs}, indent=2, allow_nan=False)
 
-    return json.dumps({
-        "aligned": result.aligned,
-        "fallback_used": result.fallback_used,
-        "inlier_count": result.inlier_count,
-        "rms_residual_pixels": optional_number(result.rms_residual_pixels),
-        "rms_residual_meters": optional_number(result.rms_residual_meters),
-        "delta_alpha_radians": optional_number(result.delta_alpha),
-        "sigma_delta_alpha_radians": optional_number(result.sigma_delta_alpha),
-        "hough_bin_size_pixels": optional_number(result.hough_bin_size),
-        "translation": None if result.translation is None else result.translation.tolist(),
-        "homography": None if result.homography is None else result.homography.tolist(),
-    }, indent=2, allow_nan=False)
 
-
-def _run_signature(form_a: dict, form_b: dict, q_value: float, tile_budget: int) -> str:
+def _run_signature(form_a: dict, form_b: dict, q_value: float, tile_budget: int, geometry_mode: str) -> str:
     def serializable(form):
         return {
             key: value for key, value in form.items()
@@ -276,7 +291,7 @@ def _run_signature(form_a: dict, form_b: dict, q_value: float, tile_budget: int)
         }
 
     content = json.dumps(
-        {"a": serializable(form_a), "b": serializable(form_b), "q": q_value, "tile_budget": tile_budget},
+        {"a": serializable(form_a), "b": serializable(form_b), "q": q_value, "tile_budget": tile_budget, "geometry_mode": geometry_mode},
         sort_keys=True,
     )
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
@@ -284,6 +299,16 @@ def _run_signature(form_a: dict, form_b: dict, q_value: float, tile_budget: int)
 
 with st.sidebar:
     st.markdown("### Run settings")
+    geometry_mode = st.radio(
+        "Solar geometry source",
+        [SPICE_MODE, METADATA_MODE, COMPARE_MODE],
+        index=0,
+        help="Metadata-only mode uses the scene-wide azimuth and elevation you enter for every tile and does not load or call SPICE. Comparison mode runs SPICE and reports metadata-minus-SPICE angle differences.",
+    )
+    if geometry_mode == METADATA_MODE:
+        st.info("SPICE is bypassed. Scene-wide solar angles are treated as constant across the image; geographic variation and its derivative are unavailable. Stage V handles the unknown angular contribution conservatively and may use its full-ring fallback.")
+    elif geometry_mode == COMPARE_MODE:
+        st.caption("SPICE computes the Stage-II geometry; the entered scene-wide metadata angles are shown beside it for comparison.")
     q = st.slider(
         "Shadow-threshold bias q", 0.05, 0.10, 0.075, 0.005,
         help="V3 §4.3 biases the local Otsu threshold toward the darker shadow class. The permitted range is 0.05–0.10; 0.075 is the starting value.",
@@ -304,24 +329,28 @@ with st.sidebar:
         "Minimum verified matches · inliers", min_value=4, value=10, step=1,
         help="Minimum number of descriptor correspondences that must agree with the translation consensus before the tile pair is reported as aligned.",
     )
-    st.caption("Solar azimuth/elevation are calculated from acquisition time and footprint using the bundled SPICE kernels.")
+    if geometry_mode == SPICE_MODE:
+        st.caption("Solar azimuth/elevation are calculated from acquisition time and footprint using the bundled SPICE kernels.")
 
 input_col_a, input_col_b = st.columns(2, gap="large")
 with input_col_a:
-    form_a = _product_form("Image A", "a")
+    form_a = _product_form("Image A", "a", geometry_mode)
 with input_col_b:
-    form_b = _product_form("Image B", "b")
+    form_b = _product_form("Image B", "b", geometry_mode)
 
 run_col, note_col = st.columns([1, 3], vertical_alignment="center")
 with run_col:
     analyze = st.button("Prepare images & estimate solar geometry", type="primary", use_container_width=True)
 with note_col:
-    st.caption("Required for each image: image file, UTC acquisition time, GSD, emission angle, and four image-array corner geolocations. Optional: fill value and geolocation uncertainty.")
+    required = "image file, UTC acquisition time, GSD, emission angle, and four image-array corner geolocations"
+    if geometry_mode != SPICE_MODE:
+        required += ", plus scene-wide solar azimuth and elevation"
+    st.caption(f"Required for each image: {required}. Optional: fill value and geolocation uncertainty.")
 
-current_signature = _run_signature(form_a, form_b, float(q), int(max_pixels_per_tile))
+current_signature = _run_signature(form_a, form_b, float(q), int(max_pixels_per_tile), geometry_mode)
 if st.session_state.get("patchrift_run_signature") != current_signature:
     st.session_state.pop("patchrift_run", None)
-    st.session_state.pop("patchrift_pair_result", None)
+    st.session_state.pop("patchrift_pair_results", None)
     st.session_state.pop("patchrift_match_signature", None)
 
 if analyze:
@@ -329,24 +358,40 @@ if analyze:
         with st.spinner("Reading images and running Stages I–II for both products…"):
             image_a, stage_i_a, sensor_a = _make_product(form_a)
             image_b, stage_i_b, sensor_b = _make_product(form_b)
-            if not st.session_state.get("patchrift_spice_loaded", False):
+            if uses_spice(geometry_mode) and not st.session_state.get("patchrift_spice_loaded", False):
                 load_spice_kernels(KERNEL_CONFIG)
                 st.session_state["patchrift_spice_loaded"] = True
             config = StageIIConfig(q=float(q))
-            stage_ii_a = process_stage_ii_image(
-                stage_i_a, config, max_pixels_per_tile=int(max_pixels_per_tile)
-            )
-            stage_ii_b = process_stage_ii_image(
-                stage_i_b, config, max_pixels_per_tile=int(max_pixels_per_tile)
-            )
+            def process_product(stage_i, form):
+                if geometry_mode != SPICE_MODE and (
+                    form["solar_azimuth_rad"] is None or form["solar_elevation_rad"] is None
+                ):
+                    raise ValueError("Enter scene-wide solar azimuth and elevation for both images")
+                if geometry_mode != SPICE_MODE:
+                    degrees_to_geometry(
+                        np.rad2deg(form["solar_azimuth_rad"]),
+                        np.rad2deg(form["solar_elevation_rad"]),
+                    )
+                return process_stage_ii_image(
+                    stage_i, config, max_pixels_per_tile=int(max_pixels_per_tile),
+                    **metadata_geometry_kwargs(
+                        geometry_mode, form["solar_azimuth_rad"], form["solar_elevation_rad"]
+                    ),
+                )
+
+            stage_ii_a = process_product(stage_i_a, form_a)
+            stage_ii_b = process_product(stage_i_b, form_b)
             st.session_state["patchrift_run"] = {
                 "image_a": image_a, "image_b": image_b,
                 "stage_i_a": stage_i_a, "stage_i_b": stage_i_b,
                 "stage_ii_a": stage_ii_a, "stage_ii_b": stage_ii_b,
                 "sensor_a": sensor_a, "sensor_b": sensor_b,
+                "geometry_mode": geometry_mode,
+                "metadata_geometry_a": (form_a["solar_azimuth_rad"], form_a["solar_elevation_rad"]),
+                "metadata_geometry_b": (form_b["solar_azimuth_rad"], form_b["solar_elevation_rad"]),
             }
             st.session_state["patchrift_run_signature"] = current_signature
-            st.session_state.pop("patchrift_pair_result", None)
+            st.session_state.pop("patchrift_pair_results", None)
     except Exception as exc:
         st.error(f"Could not process this pair: {exc}")
 
@@ -358,77 +403,187 @@ if run_data:
     with image_left:
         st.markdown(f"**Image A · {run_data['sensor_a']}**")
         st.image(_preview(run_data["image_a"]), caption=f"{run_data['image_a'].shape[1]} × {run_data['image_a'].shape[0]} px", use_container_width=True, clamp=True)
-        st.dataframe(_tile_summary(run_data["stage_ii_a"]), hide_index=True, use_container_width=True)
+        geometry_a = run_data["metadata_geometry_a"] if run_data["geometry_mode"] == COMPARE_MODE else None
+        st.dataframe(tile_summary_rows(run_data["stage_ii_a"], geometry_a), hide_index=True, use_container_width=True)
     with image_right:
         st.markdown(f"**Image B · {run_data['sensor_b']}**")
         st.image(_preview(run_data["image_b"]), caption=f"{run_data['image_b'].shape[1]} × {run_data['image_b'].shape[0]} px", use_container_width=True, clamp=True)
-        st.dataframe(_tile_summary(run_data["stage_ii_b"]), hide_index=True, use_container_width=True)
+        geometry_b = run_data["metadata_geometry_b"] if run_data["geometry_mode"] == COMPARE_MODE else None
+        st.dataframe(tile_summary_rows(run_data["stage_ii_b"], geometry_b), hide_index=True, use_container_width=True)
 
     stage_ii_a, stage_ii_b = run_data["stage_ii_a"], run_data["stage_ii_b"]
     if stage_ii_a.planarity_flag or stage_ii_b.planarity_flag:
         st.warning("At least one image has emission angle above approximately 15°. V3 flags the planar-geometry limitation; inspect the result before interpreting a match.")
 
     st.markdown("## Stage III–V correspondence")
-    st.caption("A tile is a rectangular subsection of an image created to meet memory and solar-angle limits. Select the same lunar region in Image A and Image B; use the row/column ranges above and the footprint metadata to choose corresponding tiles.")
-    tile_col_a, tile_col_b = st.columns(2)
-    selected_a = tile_col_a.selectbox(
-        "Image A tile", range(len(stage_ii_a.tiles)), format_func=lambda ix: f"Tile {ix + 1} · {stage_ii_a.tiles[ix].shape[1]} × {stage_ii_a.tiles[ix].shape[0]} px",
-        key="match_tile_a",
+    st.caption("Tile matching is planned automatically from the two image footprints. Each candidate pair runs on its own; its result is saved and displayed as soon as it finishes, then the next pair starts automatically.")
+    pairing_label = st.radio(
+        "Tile-pair search",
+        ["Geographic overlap only (recommended)", "All Image A tiles × all Image B tiles"],
+        horizontal=True,
+        key="tile_pairing_mode",
+        help="Overlap mode avoids work where the metadata footprints do not intersect. Exhaustive mode tests every possible tile pair and can take substantially longer.",
     )
-    selected_b = tile_col_b.selectbox(
-        "Image B tile", range(len(stage_ii_b.tiles)), format_func=lambda ix: f"Tile {ix + 1} · {stage_ii_b.tiles[ix].shape[1]} × {stage_ii_b.tiles[ix].shape[0]} px",
-        key="match_tile_b",
-    )
+    pairing_mode = "all" if pairing_label.startswith("All ") else "overlap"
+    try:
+        candidate_pairs = plan_tile_pairs(stage_ii_a, stage_ii_b, pairing_mode)
+    except Exception as exc:
+        candidate_pairs = []
+        st.error(f"Could not plan tile pairs from the footprint metadata: {exc}")
+    if pairing_mode == "all":
+        st.warning(f"Exhaustive mode will test {len(candidate_pairs):,} tile pairs. Runtime grows with both tile counts.")
+    elif not candidate_pairs:
+        st.warning("The supplied footprints show no overlapping tile pairs. Check the corner coordinates or use exhaustive mode if the footprints are approximate.")
+    else:
+        st.info(f"Automatic geographic-overlap planning found {len(candidate_pairs):,} candidate tile pair(s).")
+    with st.expander("How automatic tile pairing chooses pairs"):
+        st.markdown(
+            """
+            1. Stage II independently subdivides each image to satisfy the solar-azimuth
+               variation limit and the configured pixels-per-tile memory cap.
+            2. Each adaptive tile's four array-corner locations are estimated from the
+               product's image-corner geolocation metadata.
+            3. In **Geographic overlap** mode, every Image A tile is compared with every
+               Image B tile. The corner polygons are projected to a local
+               equirectangular plane (with longitude wrap handled at the date line),
+               and convex-polygon clipping computes their intersection area. Pairs with
+               positive area above the numerical tolerance are candidates. Touching
+               edges alone do not count as overlap.
+            4. In **All tiles × all tiles** mode, the candidate list is the full Cartesian
+               product: `(A0,B0), (A0,B1), …, (A1,B0), …`. Geographic overlap is not
+               used to filter this list.
+            5. Candidate pairing only decides which tile pairs to try. Stages III–V
+               still extract features and verify correspondence independently for each
+               pair; tile indices are never assumed to correspond across images.
+            """
+        )
+
     match_signature = (
-        current_signature, int(selected_a), int(selected_b),
+        current_signature, pairing_mode, tuple(candidate_pairs),
         float(lambda_max), int(minimum_inliers),
     )
     if st.session_state.get("patchrift_match_signature") != match_signature:
-        st.session_state.pop("patchrift_pair_result", None)
-    if st.button("Match selected tiles", type="primary"):
-        try:
-            with st.spinner("Conditioning tiles, building descriptors, and verifying correspondences…"):
-                result = match_tile_pair(
-                    stage_ii_a.stage_i, stage_ii_a.tiles[selected_a], stage_ii_a.tile_results[selected_a],
-                    stage_ii_b.stage_i, stage_ii_b.tiles[selected_b], stage_ii_b.tile_results[selected_b],
-                    gsd_a=stage_ii_a.stage_i.product.metadata.gsd,
-                    gsd_b=stage_ii_b.stage_i.product.metadata.gsd,
-                    gsd_target=max(stage_ii_a.stage_i.product.metadata.gsd, stage_ii_b.stage_i.product.metadata.gsd),
-                    lambda_max_a=float(lambda_max), lambda_max_b=float(lambda_max),
-                    matching_options={"minimum_inliers": int(minimum_inliers)},
-                )
-                st.session_state["patchrift_pair_result"] = result
-                st.session_state["patchrift_match_signature"] = match_signature
-        except Exception as exc:
-            st.error(f"Tile matching did not complete: {exc}")
+        st.session_state.pop("patchrift_pair_results", None)
+    st.session_state["patchrift_match_signature"] = match_signature
+    records = st.session_state.get("patchrift_pair_results", [])
+    processed_pairs = {(record["tile_a"], record["tile_b"]) for record in records}
+    remaining_pairs = [pair for pair in candidate_pairs if pair not in processed_pairs]
+    if records and remaining_pairs:
+        st.caption(f"{len(records):,} tile pair(s) already have saved results. New results appear as each remaining pair finishes; processing continues automatically.")
+    elif not records and candidate_pairs:
+        st.caption("Each completed tile pair will appear below immediately. Processing then continues to the next pair automatically.")
 
-    pair_result = st.session_state.get("patchrift_pair_result")
-    if pair_result:
-        matching = pair_result.matching
-        if not matching.aligned:
-            st.warning("No verified alignment for this tile pair. Try another geographically corresponding tile pair or review product metadata.")
+    if remaining_pairs and st.button(
+        "Continue remaining tile pairs" if records else "Match planned tile pairs",
+        type="primary",
+    ):
+        progress = st.progress(
+            len(records) / len(candidate_pairs),
+            text=f"Starting at pair {len(records) + 1:,} of {len(candidate_pairs):,}…",
+        )
+        live_results = st.container()
+
+        def match_one(tile_a, tile_b):
+            return match_tile_pair(
+                stage_ii_a.stage_i, stage_ii_a.tiles[tile_a], stage_ii_a.tile_results[tile_a],
+                stage_ii_b.stage_i, stage_ii_b.tiles[tile_b], stage_ii_b.tile_results[tile_b],
+                gsd_a=stage_ii_a.stage_i.product.metadata.gsd,
+                gsd_b=stage_ii_b.stage_i.product.metadata.gsd,
+                gsd_target=max(stage_ii_a.stage_i.product.metadata.gsd, stage_ii_b.stage_i.product.metadata.gsd),
+                lambda_max_a=float(lambda_max), lambda_max_b=float(lambda_max),
+                matching_options={"minimum_inliers": int(minimum_inliers)},
+            )
+
+        def save_and_render(raw_record):
+            result = raw_record["result"]
+            record = {
+                "tile_a": raw_record["tile_a"], "tile_b": raw_record["tile_b"],
+                "matching": None, "correspondence_rows": [], "error": raw_record["error"],
+            }
+            if result is not None:
+                try:
+                    matching = result.matching
+                    points_a = result.features_a.features.canonical_positions
+                    points_b = result.features_b.features.canonical_positions
+                    record["matching"] = matching
+                    record["correspondence_rows"] = [
+                        [int(index_a), int(index_b), *points_a[index_a].tolist(),
+                         *points_b[index_b].tolist(), float(matching.distances[position]),
+                         bool(matching.inlier_mask[position])]
+                        for position, (index_a, index_b) in enumerate(matching.pairs)
+                    ]
+                except Exception as exc:
+                    record["error"] = f"Could not save match output: {exc}"
+            records.append(record)
+            st.session_state["patchrift_pair_results"] = list(records)
+            matching = record["matching"]
+            with live_results:
+                with st.container(border=True):
+                    st.markdown(f"**Completed · Image A tile {record['tile_a'] + 1} ↔ Image B tile {record['tile_b'] + 1}**")
+                    if matching is None:
+                        st.error(record["error"])
+                    else:
+                        if matching.aligned:
+                            st.success(f"Verified alignment · {matching.inlier_count} inliers")
+                        else:
+                            st.info(f"No verified alignment · {matching.inlier_count} inliers")
+                        residual = matching.rms_residual_meters
+                        st.caption("RMS residual: unavailable" if residual is None else f"RMS residual: {residual:.2f} m")
+
+        progress_position = len(records)
+        for _record in match_tile_pairs_incrementally(
+            remaining_pairs, match_one, save_and_render
+        ):
+            progress_position += 1
+            progress.progress(
+                progress_position / len(candidate_pairs),
+                text=f"Completed {progress_position:,} of {len(candidate_pairs):,} tile pairs…",
+            )
+
+    records = st.session_state.get("patchrift_pair_results", [])
+    if records:
+        summary = []
+        for record in records:
+            matching = record["matching"]
+            summary.append({
+                "Image A tile": record["tile_a"] + 1,
+                "Image B tile": record["tile_b"] + 1,
+                "Aligned": None if matching is None else bool(matching.aligned),
+                "Inliers": None if matching is None else matching.inlier_count,
+                "RMS residual (m)": None if matching is None else matching.rms_residual_meters,
+                "Status": record["error"] or ("verified" if matching and matching.aligned else "no verified alignment"),
+            })
+        st.dataframe(summary, hide_index=True, use_container_width=True)
+        aligned_records = [record for record in records if record["matching"] is not None and record["matching"].aligned]
+        if aligned_records:
+            st.success(f"Verified alignment in {len(aligned_records)} of {len(records)} processed tile pair(s).")
         else:
-            st.success("Geometric alignment verified.")
-        metric1, metric2, metric3, metric4 = st.columns(4)
-        metric1.metric("Inliers", matching.inlier_count)
-        metric2.metric("RMS residual", "—" if matching.rms_residual_meters is None else f"{matching.rms_residual_meters:.2f} m")
-        metric3.metric("Δα uncertainty", f"{np.rad2deg(matching.sigma_delta_alpha):.3f}°")
-        metric4.metric("Hough threshold τ", f"{matching.hough_bin_size:.2f} px")
-        if matching.fallback_used:
-            st.info("The V3 C4 unrotated/full-ring fallback was used for this tile pair.")
-        transform = {
-            "translation_px": None if matching.translation is None else matching.translation.tolist(),
-            "homography": None if matching.homography is None else matching.homography.tolist(),
-        }
-        st.markdown("**Estimated transform**")
-        st.code(json.dumps(transform, indent=2), language="json")
-        st.download_button(
-            "Download correspondence CSV", data=_correspondence_csv(pair_result),
+            st.warning("No verified alignment was found among the processed tile pairs. Review the Stage-I/II quality and product metadata.")
+        for record in records:
+            matching = record["matching"]
+            with st.expander(f"Tile A {record['tile_a'] + 1} ↔ Tile B {record['tile_b'] + 1}", expanded=bool(matching and matching.aligned)):
+                if matching is None:
+                    st.error(record["error"])
+                    continue
+                cols = st.columns(4)
+                cols[0].metric("Inliers", matching.inlier_count)
+                cols[1].metric("RMS residual", "—" if matching.rms_residual_meters is None else f"{matching.rms_residual_meters:.2f} m")
+                cols[2].metric("Δα uncertainty", "—" if matching.sigma_delta_alpha is None or not np.isfinite(matching.sigma_delta_alpha) else f"{np.rad2deg(matching.sigma_delta_alpha):.3f}°")
+                cols[3].metric("Hough threshold τ", "—" if matching.hough_bin_size is None else f"{matching.hough_bin_size:.2f} px")
+                if matching.fallback_used:
+                    st.info("The V3 C4 unrotated/full-ring fallback was used for this tile pair.")
+                st.code(json.dumps({
+                    "translation_px": None if matching.translation is None else matching.translation.tolist(),
+                    "homography": None if matching.homography is None else matching.homography.tolist(),
+                }, indent=2), language="json")
+        download_csv, download_json = st.columns(2)
+        download_csv.download_button(
+            "Download all correspondences (CSV)", data=_pair_results_csv(records),
             file_name="patchrift_correspondences.csv", mime="text/csv",
         )
-        st.download_button(
-            "Download run summary", data=_matching_json(pair_result),
-            file_name="patchrift_result.json", mime="application/json",
+        download_json.download_button(
+            "Download all pair results (JSON)", data=_pair_results_json(records, pairing_mode),
+            file_name="patchrift_results.json", mime="application/json",
         )
 
     st.caption("Prototype note: uploads are single-band scalar arrays. Raw IIRS cubes require the documented Stage-I spectral reduction before upload.")

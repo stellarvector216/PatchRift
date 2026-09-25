@@ -26,6 +26,34 @@ def test_ui_rejects_hyperspectral_npy_with_actionable_message():
         read_scalar_image("cube.npy", payload.getvalue())
 
 
+@pytest.mark.parametrize("dtype", [np.uint8, np.uint16])
+def test_ui_reads_grayscale_png_without_changing_pixel_values(dtype):
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    source = np.arange(20, dtype=dtype).reshape(4, 5)
+    payload = BytesIO()
+    Image.fromarray(source).save(payload, format="PNG")
+
+    actual = read_scalar_image("lunar.png", payload.getvalue())
+
+    assert actual.shape == source.shape
+    assert actual.dtype == np.float32
+    np.testing.assert_array_equal(actual, source.astype(np.float32))
+
+
+def test_ui_rejects_color_png_instead_of_silently_grayscaling():
+    pytest.importorskip("PIL")
+    from PIL import Image
+
+    source = np.zeros((4, 5, 3), dtype=np.uint8)
+    payload = BytesIO()
+    Image.fromarray(source).save(payload, format="PNG")
+
+    with pytest.raises(ValueError, match="RGB/RGBA images are not converted"):
+        read_scalar_image("color.png", payload.getvalue())
+
+
 def test_footprint_parser_keeps_lon_lat_and_array_corner_order():
     corners = parse_footprint_corners("10, 20\n11, 20\n11, 21\n10, 21")
     np.testing.assert_array_equal(corners, [[10, 20], [11, 20], [11, 21], [10, 21]])
